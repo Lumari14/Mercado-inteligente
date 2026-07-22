@@ -16,6 +16,9 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <meta name="apple-mobile-web-app-title" content="Mercado" />
 <link rel="apple-touch-icon" href="apple-touch-icon.png" />
+
+<!-- Cliente de Supabase (nube: login + sincronización entre dispositivos) -->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <style>
   :root{
     --bg:#0f1115; --panel:#171a21; --panel2:#1f232c; --line:#2a2f3a;
@@ -152,6 +155,7 @@
     <span class="logo">🛒</span>
     <h1>Mercado Inteligente</h1>
     <span class="spacer"></span>
+    <span class="chip" id="syncChip" style="display:none; align-self:center">☁️</span>
     <button class="btn primary sm" id="btnInstall" style="display:none">📲 Instalar</button>
     <button class="btn ghost sm" id="btnExportMenu">⬇ Exportar</button>
   </div>
@@ -272,6 +276,10 @@
 
   <!-- ============ AJUSTES ============ -->
   <section id="ajustes">
+    <div class="card" id="cuentaCard">
+      <h2>☁️ Cuenta y sincronización</h2>
+      <div id="cuentaBody"></div>
+    </div>
     <div class="card">
       <h2>Supermercados</h2>
       <p class="sub">Añade o quita las tiendas que comparas.</p>
@@ -319,6 +327,21 @@
       <button class="btn ghost" id="pmCancel">Cancelar</button>
       <button class="btn primary" id="pmSave">Guardar precios</button>
     </div>
+  </div>
+</div>
+
+<!-- Pantalla de inicio de sesión / registro -->
+<div class="modal-backdrop" id="authOverlay" style="display:none; z-index:300">
+  <div class="modal" style="max-width:390px">
+    <div style="text-align:center; font-size:42px; line-height:1">🛒</div>
+    <h2 style="text-align:center" id="authTitle">Entra a tu cuenta</h2>
+    <p class="sub" style="text-align:center">Guarda tu mercado en la nube y accede con la misma cuenta desde el móvil y el ordenador.</p>
+    <input id="authEmail" type="email" autocomplete="email" placeholder="Tu correo" style="width:100%; margin-bottom:8px"/>
+    <input id="authPass" type="password" autocomplete="current-password" placeholder="Tu contraseña (mín. 6)" style="width:100%; margin-bottom:8px"/>
+    <div id="authError" style="font-size:13px; min-height:18px; margin-bottom:6px; color:var(--danger)"></div>
+    <button class="btn primary" id="authLoginBtn" style="width:100%; margin-bottom:8px">Iniciar sesión</button>
+    <button class="btn" id="authSignupBtn" style="width:100%; margin-bottom:14px">Crear cuenta nueva</button>
+    <div style="text-align:center"><a href="#" id="authSkip" style="font-size:13px">Usar sin cuenta en este dispositivo</a></div>
   </div>
 </div>
 
@@ -383,7 +406,8 @@ function load(){
   try{ const raw = localStorage.getItem(STORE_KEY); if(raw) return JSON.parse(raw); }catch(e){}
   return defaultData();
 }
-function save(){ localStorage.setItem(STORE_KEY, JSON.stringify(data)); }
+function saveLocal(){ localStorage.setItem(STORE_KEY, JSON.stringify(data)); }
+function save(){ saveLocal(); scheduleCloudSync(); }
 function uid(){ return Date.now().toString(36)+Math.random().toString(36).slice(2,7); }
 
 /* ---------- Utilidades ---------- */
@@ -671,6 +695,7 @@ function renderDonut(porCat){
 
 /* ----- AJUSTES ----- */
 function renderAjustes(){
+  renderCuenta();
   $('#monedaSel').value = data.moneda;
   $('#superList').innerHTML = data.supermercados.map(s=>`
     <div class="list-item" style="padding:8px 12px">
@@ -967,6 +992,118 @@ $('#btnInstall').addEventListener('click', async ()=>{
   if(isIOS){ alert('Para instalar en iPhone/iPad:\n\n1. Toca el botón Compartir (el cuadrado con la flecha ↑) abajo en Safari.\n2. Elige "Añadir a pantalla de inicio".\n3. Confirma con "Añadir".\n\nSe abrirá como una app a pantalla completa.'); return; }
   alert('Abre el menú de tu navegador y elige "Instalar app" o "Añadir a pantalla de inicio".');
 });
+
+/* ============================================================
+   NUBE — login, registro y sincronización (Supabase)
+   ============================================================ */
+const SB_URL='https://nqzrrpalnrpcpoufthcb.supabase.co';
+const SB_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5xenJycGFsbnJwY3BvdWZ0aGNiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ3MTExOTQsImV4cCI6MjEwMDI4NzE5NH0.fi4h-RLnVLnkZqOjUH1p2AbfkXWGmdJccerWy0keeOo';
+let sb=null, currentUser=null, syncTimer=null;
+try{ if(window.supabase && window.supabase.createClient) sb=window.supabase.createClient(SB_URL, SB_KEY); }catch(e){}
+
+function setSync(state){
+  const c=$('#syncChip'); if(!c) return;
+  if(!currentUser){ c.style.display='none'; return; }
+  c.style.display='';
+  c.textContent = state==='saving' ? '☁️ Guardando…' : state==='off' ? '⚠️ Sin conexión' : '☁️ Sincronizado';
+}
+function scheduleCloudSync(){
+  if(!currentUser||!sb) return;
+  setSync('saving');
+  clearTimeout(syncTimer);
+  syncTimer=setTimeout(pushCloud, 1000);
+}
+async function pushCloud(){
+  if(!currentUser||!sb) return;
+  try{
+    const {error}=await sb.from('datos_usuario').upsert({user_id:currentUser.id, data:data, updated_at:new Date().toISOString()});
+    setSync(error?'off':'ok');
+  }catch(e){ setSync('off'); }
+}
+async function loadCloud(){
+  if(!currentUser||!sb) return;
+  try{
+    const {data:row}=await sb.from('datos_usuario').select('data').eq('user_id',currentUser.id).maybeSingle();
+    if(row && row.data && row.data.catalogo){        // ya tenía datos en la nube -> se cargan
+      data=row.data; saveLocal(); renderAll(); setSync('ok');
+    } else {                                          // primera vez -> sube lo que haya en este dispositivo
+      await pushCloud(); setSync('ok');
+    }
+  }catch(e){ setSync('off'); }
+}
+function showAuth(show){ const o=$('#authOverlay'); if(o) o.style.display = show?'flex':'none'; }
+async function handleSession(session){
+  currentUser = session ? session.user : null;
+  if(currentUser){
+    showAuth(false);
+    localStorage.removeItem('mercado_sin_cuenta');
+    await loadCloud();
+  } else {
+    setSync('hidden');
+    if(localStorage.getItem('mercado_sin_cuenta')!=='1') showAuth(true);
+  }
+  renderCuenta();
+}
+function traducirError(m){
+  if(/Invalid login/i.test(m)) return 'Correo o contraseña incorrectos.';
+  if(/already registered|already been registered/i.test(m)) return 'Ese correo ya tiene cuenta. Inicia sesión.';
+  if(/Email not confirmed/i.test(m)) return 'Confirma tu correo primero (revisa tu email).';
+  if(/at least 6/i.test(m)) return 'La contraseña debe tener al menos 6 caracteres.';
+  if(/rate limit|too many/i.test(m)) return 'Demasiados intentos, espera un momento.';
+  return m||'Ha ocurrido un error.';
+}
+async function authLogin(){
+  if(!sb){ $('#authError').textContent='Necesitas conexión para iniciar sesión.'; return; }
+  const email=$('#authEmail').value.trim(), pw=$('#authPass').value;
+  if(!email||!pw){ $('#authError').style.color='var(--danger)'; $('#authError').textContent='Escribe correo y contraseña.'; return; }
+  $('#authError').style.color='var(--danger)'; $('#authError').textContent='Entrando…';
+  const {error}=await sb.auth.signInWithPassword({email,password:pw});
+  if(error) $('#authError').textContent=traducirError(error.message);
+  else $('#authError').textContent='';
+}
+async function authSignup(){
+  if(!sb){ $('#authError').textContent='Necesitas conexión para crear la cuenta.'; return; }
+  const email=$('#authEmail').value.trim(), pw=$('#authPass').value;
+  if(!email||!pw){ $('#authError').style.color='var(--danger)'; $('#authError').textContent='Escribe correo y contraseña.'; return; }
+  if(pw.length<6){ $('#authError').style.color='var(--danger)'; $('#authError').textContent='La contraseña debe tener al menos 6 caracteres.'; return; }
+  $('#authError').style.color='var(--danger)'; $('#authError').textContent='Creando cuenta…';
+  const {data:res,error}=await sb.auth.signUp({email,password:pw});
+  if(error){ $('#authError').textContent=traducirError(error.message); return; }
+  if(res && res.session){ $('#authError').textContent=''; }  // sesión lista -> onAuthStateChange se encarga
+  else { $('#authError').style.color='var(--accent)'; $('#authError').textContent='Cuenta creada. Revisa tu correo para confirmarla y luego inicia sesión.'; }
+}
+async function authLogout(){
+  if(sb) await sb.auth.signOut();
+  localStorage.setItem('mercado_sin_cuenta','1');   // evita que el overlay reaparezca solo
+  location.reload();
+}
+function renderCuenta(){
+  const b=$('#cuentaBody'); if(!b) return;
+  if(!sb){
+    b.innerHTML=`<p class="sub" style="margin:0">La sincronización en la nube no está disponible ahora mismo (sin conexión). La app funciona igual y guarda en este dispositivo.</p>`;
+    return;
+  }
+  if(currentUser){
+    b.innerHTML=`<p class="sub" style="margin:0 0 10px">Sesión iniciada como <b>${esc(currentUser.email)}</b>. Tus datos se sincronizan solos entre tus dispositivos. ☁️</p>
+      <button class="btn danger" id="btnLogout">Cerrar sesión</button>`;
+    $('#btnLogout').addEventListener('click', authLogout);
+  } else {
+    b.innerHTML=`<p class="sub" style="margin:0 0 10px">Estás usando la app <b>sin cuenta</b> (los datos solo se guardan en este dispositivo). Inicia sesión para sincronizar con tu móvil u ordenador.</p>
+      <button class="btn primary" id="btnShowAuth">Iniciar sesión / crear cuenta</button>`;
+    $('#btnShowAuth').addEventListener('click', ()=>showAuth(true));
+  }
+}
+// eventos de la pantalla de login
+$('#authLoginBtn').addEventListener('click', authLogin);
+$('#authSignupBtn').addEventListener('click', authSignup);
+$('#authPass').addEventListener('keydown', e=>{ if(e.key==='Enter') authLogin(); });
+$('#authSkip').addEventListener('click', e=>{ e.preventDefault(); localStorage.setItem('mercado_sin_cuenta','1'); showAuth(false); renderCuenta(); });
+// arranque de sesión (onAuthStateChange dispara también con la sesión inicial)
+if(sb){
+  sb.auth.onAuthStateChange((_ev, session)=>{ setTimeout(()=>handleSession(session), 0); });
+} else {
+  setSync('hidden');
+}
 
 /* init */
 renderAll();
